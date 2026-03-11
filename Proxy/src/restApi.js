@@ -16,12 +16,17 @@ const express = require('express');
 const cors    = require('cors');
 
 const trendStore = require('./trendStore');
+const measStore  = require('./measStore');
 const wsServer   = require('./wsServer');
+const hifClient  = require('./hifClient');
 
 const REST_PORT = parseInt(process.env.REST_PORT, 10) || 3001;
 
 /** Tracks whether the TCP connection to the device is currently active */
 let _deviceConnected = false;
+
+/** Tracks whether the INLINE meas connection (port 25001) is active */
+let _measConnected = false;
 
 /** Server start time for uptime reporting */
 const _startTime = Date.now();
@@ -46,6 +51,7 @@ app.get('/health', (req, res) => {
     res.json({
         status:             'ok',
         connectedToDevice:  _deviceConnected,
+        measConnected:      _measConnected,
         wsClients:          wsServer.getClientCount(),
         uptimeSeconds:      Math.floor((Date.now() - _startTime) / 1000),
         serverTime:         new Date().toISOString(),
@@ -110,6 +116,68 @@ app.delete('/trend/:gage', (req, res) => {
 });
 
 /**
+ * GET /meas
+ * Returns INLINE reading history for all gages (0-6).
+ */
+app.get('/meas', (req, res) => {
+    res.json({
+        status: 'ok',
+        data:   measStore.getAllGages(),
+    });
+});
+
+/**
+ * GET /meas/:gage
+ * Returns INLINE reading history for a specific gage number (0-6).
+ */
+app.get('/meas/:gage', (req, res) => {
+    const gageNo = parseInt(req.params.gage, 10);
+
+    if (isNaN(gageNo) || gageNo < 0 || gageNo >= measStore.GAGE_COUNT) {
+        return res.status(400).json({
+            status:  'error',
+            message: `Invalid gage number. Must be 0-${measStore.GAGE_COUNT - 1}.`,
+        });
+    }
+
+    const { hiAlert, loAlert, target } = hifClient.getAlerts(gageNo);
+
+    res.json({
+        status:    'ok',
+        gage:      gageNo,
+        count:     measStore.getCount(gageNo),
+        maxPoints: measStore.MAX_POINTS,
+        target,
+        hiAlert,
+        loAlert,
+        data:      measStore.getHistory(gageNo),
+    });
+});
+
+/**
+ * DELETE /meas/:gage
+ * Clears the INLINE reading history for a specific gage number.
+ */
+app.delete('/meas/:gage', (req, res) => {
+    const gageNo = parseInt(req.params.gage, 10);
+
+    if (isNaN(gageNo) || gageNo < 0 || gageNo >= measStore.GAGE_COUNT) {
+        return res.status(400).json({
+            status:  'error',
+            message: `Invalid gage number. Must be 0-${measStore.GAGE_COUNT - 1}.`,
+        });
+    }
+
+    measStore.clear(gageNo);
+    console.log(`[${new Date().toISOString()}] REST API: cleared meas history for gage ${gageNo}`);
+
+    res.json({
+        status:  'ok',
+        message: `Meas history cleared for gage ${gageNo}.`,
+    });
+});
+
+/**
  * Catch-all 404 handler for undefined routes.
  */
 app.use((req, res) => {
@@ -150,7 +218,18 @@ function setDeviceConnected(connected) {
     _deviceConnected = connected;
 }
 
+/**
+ * Updates the INLINE meas connection state.
+ * Called by measClient.js when the port 25001 connection opens or closes.
+ *
+ * @param {boolean} connected
+ */
+function setMeasConnected(connected) {
+    _measConnected = connected;
+}
+
 module.exports = {
     start,
     setDeviceConnected,
+    setMeasConnected,
 };

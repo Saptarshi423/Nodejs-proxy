@@ -23,8 +23,10 @@
 require('dotenv').config();
 
 const tcpClient  = require('./tcpClient');
+const measClient = require('./measClient');
 const hifClient  = require('./hifClient');
 const trendStore = require('./trendStore');
+const measStore  = require('./measStore');
 const wsServer   = require('./wsServer');
 const restApi    = require('./restApi');
 
@@ -65,10 +67,52 @@ tcpClient.on('disconnected', () => {
 });
 
 // -------------------------------------------------------------------------
+// Wire INLINE meas client events (port 25001)
+// -------------------------------------------------------------------------
+
+/**
+ * 'meas' — fired for every parsed INLINE batch.
+ * Store all readings in the meas ring buffer.
+ */
+measClient.on('meas', ({ gageNo, readings }) => {
+    measStore.addReadings(gageNo, readings);
+});
+
+/**
+ * 'connected' / 'disconnected' — update /health status for meas port.
+ */
+measClient.on('connected', () => {
+    console.log(`[${new Date().toISOString()}] Meas connected`);
+    restApi.setMeasConnected(true);
+});
+
+measClient.on('disconnected', () => {
+    console.log(`[${new Date().toISOString()}] Meas connection lost`);
+    restApi.setMeasConnected(false);
+});
+
+/**
+ * Throttled WebSocket push — broadcast the latest reading per gage
+ * at most once every MEAS_BROADCAST_MS milliseconds.
+ */
+const MEAS_BROADCAST_MS = parseInt(process.env.MEAS_BROADCAST_MS, 10) || 1000;
+
+setInterval(() => {
+    for (let g = 0; g < 7; g++) {
+        const history = measStore.getHistory(g);
+        //console.log(history.length)
+        if (history.length === 0) continue;
+        const latest = history[history.length - 1];
+        //wsServer.broadcast({ type: 'meas', gage: g, ...latest });
+    }
+}, MEAS_BROADCAST_MS);
+
+// -------------------------------------------------------------------------
 // Start TCP client (connect to device)
 // -------------------------------------------------------------------------
 
 tcpClient.connect();
+measClient.connect();
 hifClient.connect();
 
 // -------------------------------------------------------------------------
@@ -105,6 +149,7 @@ console.log(`
 function shutdown(signal) {
     console.log(`\n[${new Date().toISOString()}] Received ${signal} — shutting down gracefully...`);
     tcpClient.stop();
+    measClient.stop();
     hifClient.stop();
     process.exit(0);
 }
