@@ -111,6 +111,15 @@ setInterval(() => {
 // Start TCP client (connect to device)
 // -------------------------------------------------------------------------
 
+/**
+ * 'alertUpdate' — fired by hifClient when a !NVA subscription push arrives.
+ * Broadcast the updated alert values immediately so the UI updates without
+ * waiting for the next scan packet.
+ */
+hifClient.on('alertUpdate', (alertObj) => {
+    wsServer.broadcast({ type: 'alertUpdate', ...alertObj });
+});
+
 tcpClient.connect();
 measClient.connect();
 hifClient.connect();

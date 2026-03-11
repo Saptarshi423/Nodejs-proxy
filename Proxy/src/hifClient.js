@@ -21,7 +21,8 @@
  *   const { hiAlert, loAlert } = hifClient.getAlerts(md);  // synchronous cache read
  */
 
-const net = require('net');
+const net          = require('net');
+const EventEmitter = require('events');
 
 const DEVICE_HOST     = process.env.DEVICE_HOST        || '192.168.29.151';
 const HIF_PORT        = parseInt(process.env.HIF_PORT, 10) || 20000;
@@ -45,8 +46,9 @@ const LOALERT    = 2115;
 /** Error code returned when a HIF item number does not exist in this firmware build */
 const HIF_ERROR_PREFIX = '^(';
 
-class HifClient {
+class HifClient extends EventEmitter {
     constructor() {
+        super(); // EventEmitter
         /** @type {net.Socket|null} */
         this._socket       = null;
 
@@ -134,6 +136,8 @@ class HifClient {
                     `[${new Date().toISOString()}] HifClient: alerts cached ` +
                     `(md=${md}, hiAlert=${hiAlert}, loAlert=${loAlert}, target=${target})`
                 );
+                // Subscribe to push notifications so future changes arrive automatically
+                this._sendSubscriptions(md);
             })
             .catch((err) => {
                 // Release the slot so the next scan can retry
@@ -243,7 +247,11 @@ class HifClient {
 
         // Find the first pending query for this item number (FIFO order guaranteed)
         const idx = this._pending.findIndex(p => p.itemNum === itemNum);
-        if (idx === -1) return;
+        if (idx === -1) {
+            // No pending query — treat as an unsolicited subscription push
+            this._handlePush(itemNum, value);
+            return;
+        }
 
         const [pending] = this._pending.splice(idx, 1);
         clearTimeout(pending.timer);
@@ -281,6 +289,55 @@ class HifClient {
             console.log(`[${new Date().toISOString()}] HifClient: using HIALERT/LOALERT (2114/2115)`);
         }
         return { hiAlert, loAlert, target };
+    }
+
+    /**
+     * Sends !NVA subscription commands for CURHIALERT, CURLOALERT, and CURTARGET.
+     * The device will push a new response line whenever any of these values change.
+     *
+     * @param {number} md
+     */
+    _sendSubscriptions(md) {
+        if (!this._socket || this._socket.destroyed) return;
+        for (const item of [CURHIALERT, CURLOALERT, CURTARGET]) {
+            this._socket.write(`!NVA ${item}?\r\n`);
+        }
+        console.log(
+            `[${new Date().toISOString()}] HifClient: subscribed to change notifications ` +
+            `(md=${md}, items=${CURHIALERT}/${CURLOALERT}/${CURTARGET})`
+        );
+    }
+
+    /**
+     * Handles an unsolicited push notification from a !NVA subscription.
+     * Updates the cached value for the matching item across all mds.
+     *
+     * @param {number} itemNum
+     * @param {number} value
+     */
+    _handlePush(itemNum, value) {
+        for (const [md, entry] of Object.entries(this._cache)) {
+            if (!entry) continue;
+            if      (itemNum === CURHIALERT) entry.hiAlert = value;
+            else if (itemNum === CURLOALERT) entry.loAlert = value;
+            else if (itemNum === CURTARGET)  entry.target  = value;
+            else return; // unrecognised item — ignore
+        }
+        const fieldName = itemNum === CURHIALERT ? 'hiAlert'
+                        : itemNum === CURLOALERT ? 'loAlert'
+                        : itemNum === CURTARGET  ? 'target'
+                        : null;
+        if (fieldName) {
+            console.log(
+                `[${new Date().toISOString()}] HifClient: push update ` +
+                `(item=${itemNum} ${fieldName}=${value})`
+            );
+            // Notify index.js so it can broadcast to WebSocket clients immediately
+            for (const [md, entry] of Object.entries(this._cache)) {
+                if (!entry) continue;
+                this.emit('alertUpdate', { gage: Number(md), hiAlert: entry.hiAlert, loAlert: entry.loAlert, target: entry.target });
+            }
+        }
     }
 
     /**
