@@ -49,6 +49,16 @@ export function useWebSocket() {
                     setScansByGage(prev => ({ ...prev, [msg.gage]: msg }));
                 }
 
+                else if (msg.type === 'alertUpdate') {
+                    // HIF subscription push — merge updated alert values into the
+                    // existing scan for that gage so the chart re-renders immediately
+                    setScansByGage(prev => {
+                        const existing = prev[msg.gage];
+                        if (!existing) return prev;
+                        return { ...prev, [msg.gage]: { ...existing, hiAlert: msg.hiAlert, loAlert: msg.loAlert, target: msg.target } };
+                    });
+                }
+
                 else if (msg.type === 'history') {
                     // The proxy sends the full trendStore on connect.
                     // Extract the most recent valid scan per gage so the chart
