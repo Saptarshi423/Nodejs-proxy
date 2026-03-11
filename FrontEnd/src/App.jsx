@@ -1,32 +1,21 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useWebSocket } from './hooks/useWebSocket';
 import ProfileChart from './components/ProfileChart';
 import './App.css';
 
 export default function App() {
-    const { latestScan, connected } = useWebSocket();
+    const { scansByGage, connected } = useWebSocket();
     const [selectedGage, setSelectedGage] = useState(null);
-    const [scansByGage,  setScansByGage]  = useState({});
-
-    // Keep the latest valid scan per gage (ignore noDataFlag != 0)
-    useEffect(() => {
-        if (!latestScan) return;
-        if (latestScan.noDataFlag !== 0) return;
-        if (!latestScan.prf || latestScan.prf.length === 0) return;
-
-        setScansByGage((prev) => {
-            const next = { ...prev, [latestScan.gage]: latestScan };
-            return next;
-        });
-
-        // Auto-select first gage seen
-        setSelectedGage((prev) => (prev === null ? latestScan.gage : prev));
-    }, [latestScan]);
 
     const availableGages = Object.keys(scansByGage).map(Number).sort();
-    const currentScan    = selectedGage !== null ? scansByGage[selectedGage] : null;
-    const alertsReady    = currentScan &&
-        !(currentScan.hiAlert === 0 && currentScan.loAlert === 0);
+
+    // Auto-select the first gage seen
+    const activeGage = selectedGage !== null && scansByGage[selectedGage] !== undefined
+        ? selectedGage
+        : (availableGages.length > 0 ? availableGages[0] : null);
+
+    const currentScan = activeGage !== null ? scansByGage[activeGage] : null;
+    const alertsReady = currentScan && (currentScan.hiAlert !== 0 || currentScan.loAlert !== 0);
 
     return (
         <div className="app">
@@ -38,13 +27,13 @@ export default function App() {
                 </span>
             </header>
 
-            {/* ── Gage tabs (only when multiple gages are present) ────────── */}
+            {/* ── Gage tabs ───────────────────────────────────────────────── */}
             {availableGages.length > 1 && (
                 <div className="gage-selector">
                     {availableGages.map((g) => (
                         <button
                             key={g}
-                            className={`gage-btn ${g === selectedGage ? 'active' : ''}`}
+                            className={`gage-btn ${g === activeGage ? 'active' : ''}`}
                             onClick={() => setSelectedGage(g)}
                         >
                             Gage {g}
@@ -58,18 +47,27 @@ export default function App() {
                 <div className="main-content">
                     {/* Stats bar */}
                     <div className="stats-bar">
-                        <StatCard label="Avg"      value={currentScan.avg?.toFixed(5)} />
-                        <StatCard label="Sigma"    value={currentScan.sigma?.toFixed(5)} />
-                        <StatCard label="Min"      value={currentScan.min?.toFixed(5)} />
-                        <StatCard label="Max"      value={currentScan.max?.toFixed(5)} />
-                        <StatCard label="Hi Alert"
-                                  value={alertsReady ? currentScan.hiAlert?.toFixed(4) : 'Fetching…'}
+                        <StatCard label="Avg"    value={currentScan.avg?.toFixed(5)} />
+                        <StatCard label="Sigma"  value={currentScan.sigma?.toFixed(5)} />
+                        <StatCard label="Min"    value={currentScan.min?.toFixed(5)} />
+                        <StatCard label="Max"    value={currentScan.max?.toFixed(5)} />
+                        <StatCard label="Target"
+                                  value={alertsReady ? currentScan.target?.toFixed(4) : 'Fetching…'} />
+                        {/* <StatCard label="Hi Alert"
+                                  value={alertsReady
+                                      ? (currentScan.target + currentScan.hiAlert).toFixed(4)
+                                      : 'Fetching…'}
                                   accent="warn" />
                         <StatCard label="Lo Alert"
-                                  value={alertsReady ? currentScan.loAlert?.toFixed(4) : 'Fetching…'}
+                                  value={alertsReady
+                                      ? (currentScan.target + currentScan.loAlert).toFixed(4)
+                                      : 'Fetching…'}
                                   accent="danger" />
-                        <StatCard label="Footage"  value={currentScan.footage?.toFixed(1)} />
-                        <StatCard label="Buckets"  value={currentScan.bktCnt} />
+                        <StatCard label="Footage" value={currentScan.footage?.toFixed(1)} />
+                        <StatCard label="Buckets" value={currentScan.bktCnt} /> */}
+                        {currentScan.noDataFlag !== 0 && (
+                            <StatCard label="⚠ No Data" value={`flag=${currentScan.noDataFlag}`} accent="danger" />
+                        )}
                     </div>
 
                     {/* Profile chart */}

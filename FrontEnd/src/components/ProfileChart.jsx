@@ -5,239 +5,262 @@ import {
     LinearScale,
     PointElement,
     LineElement,
-    Filler,
     Title,
     Tooltip,
     Legend,
 } from 'chart.js';
 
-ChartJS.register(LinearScale, PointElement, LineElement, Filler, Title, Tooltip, Legend);
+ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
 // ---------------------------------------------------------------------------
-// Custom Chart.js plugin — draws colored background regions and alert lines.
+// Custom plugin
 //
-// Regions (filled before the dataset is drawn):
-//   • Above hiAlert  → yellow
-//   • loAlert..hiAlert → green
-//   • Below loAlert  → red
-//
-// Alert lines (drawn after the dataset, so they appear on top):
-//   • hiAlert — dashed amber line with label
-//   • loAlert — dashed red line with label
-//
-// Values are passed via chart.options.plugins.alertRegions.
-// If both hiAlert and loAlert are 0 the regions are skipped (HIF not yet ready).
+// beforeDraw          — black background
+// beforeDatasetsDraw  — colored fill between profile and alert lines (% deviation)
+//                       yellow  where profile > hiPct
+//                       green   where loPct ≤ profile ≤ hiPct
+//                       red     where profile < loPct
+// afterDraw           — dashed target (0%) + alert lines on top of everything
 // ---------------------------------------------------------------------------
-const alertRegionsPlugin = {
-    id: 'alertRegions',
+const profilePlugin = {
+    id: 'profilePlugin',
 
     beforeDraw(chart) {
-        const { ctx, chartArea, scales } = chart;
-        if (!chartArea || !scales.y) return;
-
-        const { left, right, top, bottom } = chartArea;
-        const width  = right - left;
-        const height = bottom - top;
-
-        // ── Black background (full canvas, then chart area) ─────────────────
+        const { ctx, chartArea } = chart;
+        if (!chartArea) return;
         ctx.save();
         ctx.fillStyle = '#000000';
         ctx.fillRect(0, 0, chart.width, chart.height);
-        ctx.fillRect(left, top, width, height);
         ctx.restore();
+    },
 
-        const opts = chart.options.plugins?.alertRegions ?? {};
-        const { hiAlert, loAlert } = opts;
-        // Skip if alerts haven't been fetched yet
-        if (hiAlert === undefined || loAlert === undefined) return;
-        if (hiAlert === 0 && loAlert === 0) return;
+    beforeDatasetsDraw(chart) {
+        const { ctx, chartArea, scales } = chart;
+        if (!chartArea || !scales.y || !scales.x) return;
 
+        const { hiPct, loPct } = chart.options.plugins?.profilePlugin ?? {};
+        if (hiPct === undefined || loPct === undefined) return;
+        if (hiPct === 0 && loPct === 0) return;
+
+        const points = chart.data.datasets[0]?.data;
+        if (!points || points.length < 2) return;
+
+        const yHiPct = scales.y.getPixelForValue(hiPct);
+        const yLoPct = scales.y.getPixelForValue(loPct);
+        const y0     = scales.y.getPixelForValue(0); // target line
+
+        // Base clip: chart area only
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(chartArea.left, chartArea.top,
+                 chartArea.right - chartArea.left,
+                 chartArea.bottom - chartArea.top);
+        ctx.clip();
+
+        for (let i = 0; i < points.length - 1; i++) {
+            const p1 = points[i];
+            const p2 = points[i + 1];
+            const mid = (p1.y + p2.y) / 2;
+
+            const x1 = scales.x.getPixelForValue(p1.x);
+            const x2 = scales.x.getPixelForValue(p2.x);
+            const y1 = scales.y.getPixelForValue(p1.y);
+            const y2 = scales.y.getPixelForValue(p2.y);
+
+            if (mid > hiPct) {
+                // ── Yellow: profile down to hiPct ─────────────────────────
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.lineTo(x2, yHiPct);
+                ctx.lineTo(x1, yHiPct);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(220, 200, 0, 0.80)';
+                ctx.fill();
+
+                // ── Green: band from hiPct down to target (0%) ────────────
+                ctx.fillStyle = 'rgba(0, 180, 0, 0.80)';
+                ctx.fillRect(x1, yHiPct, x2 - x1, y0 - yHiPct);
+
+            } else if (mid >= loPct) {
+                // ── Green: between profile and target (0%) ────────────────
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.lineTo(x2, y0);
+                ctx.lineTo(x1, y0);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(0, 180, 0, 0.80)';
+                ctx.fill();
+
+            } else {
+                // ── Red: loPct down to profile ────────────────────────────
+                ctx.beginPath();
+                ctx.moveTo(x1, yLoPct);
+                ctx.lineTo(x2, yLoPct);
+                ctx.lineTo(x2, y2);
+                ctx.lineTo(x1, y1);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(200, 30, 30, 0.80)';
+                ctx.fill();
+            }
+        }
+        ctx.restore();
     },
 
     afterDraw(chart) {
         const { ctx, chartArea, scales } = chart;
         if (!chartArea || !scales.y) return;
 
-        const opts = chart.options.plugins?.alertRegions ?? {};
-        const { hiAlert, loAlert } = opts;
-        if (hiAlert === undefined || loAlert === undefined) return;
-        if (hiAlert === 0 && loAlert === 0) return;
+        const { hiPct, loPct, target } = chart.options.plugins?.profilePlugin ?? {};
+        if (hiPct === undefined) return;
 
         const { left, right, top, bottom } = chartArea;
-        const y = scales.y;
 
-        const drawLine = (value, strokeColor, labelText) => {
-            const py = y.getPixelForValue(value);
+        const drawLine = (value, color, label) => {
+            const py = scales.y.getPixelForValue(value);
             if (py < top || py > bottom) return;
 
             ctx.save();
-            ctx.strokeStyle = strokeColor;
-            ctx.lineWidth   = 2;
+            ctx.strokeStyle = color;
+            ctx.lineWidth   = 1.5;
             ctx.setLineDash([8, 5]);
             ctx.beginPath();
-            ctx.moveTo(left, py);
+            ctx.moveTo(left,  py);
             ctx.lineTo(right, py);
             ctx.stroke();
 
-            // Label on right edge, just above the line
             ctx.setLineDash([]);
-            ctx.fillStyle    = strokeColor;
+            ctx.fillStyle    = color;
             ctx.font         = 'bold 11px system-ui, sans-serif';
             ctx.textAlign    = 'right';
             ctx.textBaseline = 'bottom';
-            ctx.fillText(labelText, right - 6, py - 3);
+            ctx.fillText(label, right - 6, py - 3);
             ctx.restore();
         };
 
-        drawLine(hiAlert, 'rgba(255, 220, 0, 1)',   `Hi Alert: ${hiAlert.toFixed(4)}`);
-        drawLine(loAlert, 'rgba(255,  60, 60, 1)', `Lo Alert: ${loAlert.toFixed(4)}`);
+        // Target is always at 0% in deviation mode; label shows the actual target value
+        drawLine(0, 'rgba(255, 255, 255, 0.55)', `Target: ${target?.toFixed(4) ?? '0.0000'}`);
+
+        if (hiPct !== 0 || loPct !== 0) {
+            drawLine(hiPct, 'rgba(255, 220,  0, 1)',  `Hi: ${hiPct.toFixed(2)}`);
+            drawLine(loPct, 'rgba(255,  60, 60, 1)', `Lo: ${loPct.toFixed(2)}`);
+        }
     },
 };
 
-// Register once globally
-ChartJS.register(alertRegionsPlugin);
+ChartJS.register(profilePlugin);
 
 // ---------------------------------------------------------------------------
-// ProfileChart component
+// ProfileChart
 // ---------------------------------------------------------------------------
 export default function ProfileChart({ scanData }) {
     const chartRef = useRef(null);
 
-    const { prf, minScan, maxScan, hiAlert, loAlert, gage } = scanData;
-    const n = prf.length;
+    const {
+        prf,
+        minScan,
+        maxScan,
+        bktWdth,
+        hiAlert,
+        loAlert,
+        target = 0,
+        gage,
+    } = scanData;
 
-    // Build {x, y} point array with x positions mapped to [minScan, maxScan]
-    const points = useMemo(() => {
-        const span = maxScan - minScan;
-        const step = n > 1 ? span / (n - 1) : 0;
-        return prf.map((val, i) => ({ x: minScan + i * step, y: val }));
-    }, [prf, minScan, maxScan, n]);
+    const n    = prf.length;
+    const step = bktWdth ?? (n > 1 ? (maxScan - minScan) / (n - 1) : 0);
 
+    // hiAlert / loAlert from HIF are in % (e.g. +5.0 = +5%, -5.0 = -5%)
+    const hiPct = hiAlert;
+    const loPct = loAlert;
     const alertsAvailable = hiAlert !== 0 || loAlert !== 0;
 
-    // Constant reference lines used as fill targets
-    const hiAlertPoints = useMemo(
-        () => alertsAvailable ? points.map(p => ({ x: p.x, y: hiAlert })) : [],
-        [points, hiAlert, alertsAvailable],
-    );
-    const loAlertPoints = useMemo(
-        () => alertsAvailable ? points.map(p => ({ x: p.x, y: loAlert })) : [],
-        [points, loAlert, alertsAvailable],
+    const xMin = minScan;
+    const xMax = minScan + (n - 1) * step;
+
+    // Convert profile to % deviation from target: (val - target) / target * 100
+    const devPrf = useMemo(
+        () => (target !== 0 ? prf.map(val => (val - target) / target * 100) : prf),
+        [prf, target],
     );
 
-    // Green fill source: collapses to hiAlert outside the green zone → zero-height fill there
-    const greenFillPoints = useMemo(
-        () => alertsAvailable
-            ? points.map(p => ({
-                x: p.x,
-                y: (p.y >= loAlert && p.y <= hiAlert) ? p.y : hiAlert,
-              }))
-            : [],
-        [points, hiAlert, loAlert, alertsAvailable],
+    // Profile points — % deviation on Y, position on X
+    const points = useMemo(
+        () => devPrf.map((val, i) => ({ x: minScan + i * step, y: val })),
+        [devPrf, minScan, step],
     );
 
-    // Red fill source: collapses to loAlert outside the red zone → zero-height fill there
-    const redFillPoints = useMemo(
-        () => alertsAvailable
-            ? points.map(p => ({ x: p.x, y: p.y < loAlert ? p.y : loAlert }))
-            : [],
-        [points, loAlert, alertsAvailable],
-    );
+    // Y-axis range: cover both alert band and actual deviation extent
+    const yAxisRange = useMemo(() => {
+        const prfMin = Math.min(...devPrf);
+        const prfMax = Math.max(...devPrf);
 
+        if (!alertsAvailable) {
+            const range = prfMax - prfMin || 1;
+            const pad   = range * 0.1;
+            return { min: prfMin - pad, max: prfMax + pad };
+        }
+
+        const visMin = Math.min(loPct, prfMin);
+        const visMax = Math.max(hiPct, prfMax);
+        const range  = visMax - visMin || 1;
+        const pad    = Math.max(range * 0.1, 0.5);
+        return { min: visMin - pad, max: visMax + pad };
+    }, [devPrf, alertsAvailable, hiPct, loPct]);
+
+    // Single dataset — white profile line only (fill handled by canvas plugin)
     const data = useMemo(() => ({
-        datasets: [
-            // ── Dataset 0: invisible loAlert reference line ─────────────────
-            { data: loAlertPoints, borderWidth: 0, pointRadius: 0, fill: false },
-
-            // ── Dataset 1: invisible hiAlert reference line ─────────────────
-            { data: hiAlertPoints, borderWidth: 0, pointRadius: 0, fill: false },
-
-            // ── Dataset 2: green fill — only where profile is within limits ─
-            {
-                data:        greenFillPoints,
-                borderWidth: 0,
-                pointRadius: 0,
-                fill:        alertsAvailable
-                    ? { target: 1, above: 'transparent', below: 'rgba(0, 180, 0, 0.45)' }
-                    : false,
-            },
-
-            // ── Dataset 3: red fill — only where profile is below loAlert ───
-            {
-                data:        redFillPoints,
-                borderWidth: 0,
-                pointRadius: 0,
-                fill:        alertsAvailable
-                    ? { target: 0, above: 'transparent', below: 'rgba(200, 30, 30, 0.55)' }
-                    : false,
-            },
-
-            // ── Dataset 4: profile line — yellow fill above hiAlert + segment color ─
-            {
-                label:       `Gage ${gage} Profile`,
-                data:        points,
-                borderWidth: 1.5,
-                pointRadius: 0,
-                tension:     0,
-                borderColor: 'rgba(255, 255, 255, 0.9)',
-                fill:        alertsAvailable
-                    ? { target: 1, above: 'rgba(220, 200, 0, 0.50)', below: 'transparent' }
-                    : false,
-                segment: alertsAvailable ? {
-                    borderColor: (ctx) => {
-                        const y = ctx.p1.parsed.y;
-                        if (y > hiAlert) return 'rgba(220, 200, 0, 1)';
-                        if (y < loAlert) return 'rgba(200,  30, 30, 1)';
-                        return 'rgba(0, 180, 0, 1)';
-                    },
-                } : undefined,
-            },
-        ],
-    }), [points, gage, hiAlert, loAlert,
-         hiAlertPoints, loAlertPoints, greenFillPoints, redFillPoints, alertsAvailable]);
+        datasets: [{
+            label:       `Gage ${gage}`,
+            data:        points,
+            borderColor: 'rgba(255, 255, 255, 0.95)',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            tension:     0,
+            fill:        false,
+        }],
+    }), [points, gage]);
 
     const options = useMemo(() => ({
         responsive:          true,
         maintainAspectRatio: false,
-        animation:           false,   // disable for smooth live updates
-        parsing:             false,   // data already in {x,y} form
+        animation:           false,
+        parsing:             false,
 
         plugins: {
-            legend: { display: false },
-            title:  { display: false },
+            legend:  { display: false },
+            title:   { display: false },
             tooltip: {
-                mode: 'index',
+                mode:      'index',
                 intersect: false,
-                filter: (item) => item.datasetIndex === 4,   // only the profile
                 callbacks: {
-                    title:  (items) => `Position: ${items[0]?.parsed.x.toFixed(2)} mm`,
-                    label:  (ctx)   => `Value: ${ctx.parsed.y.toFixed(5)}`,
+                    title: (items) => `Position: ${items[0]?.parsed.x.toFixed(2)} mm`,
+                    label: (ctx)   => `Deviation: ${ctx.parsed.y.toFixed(3)}%`,
                 },
             },
-            // Pass alert values to the custom plugin
-            alertRegions: { hiAlert, loAlert },
+            // Pass % values and actual target to the custom plugin
+            profilePlugin: { hiPct, loPct, target },
         },
 
         scales: {
             x: {
                 type:  'linear',
-                min:   minScan,
-                max:   maxScan,
+                min:   xMin,
+                max:   xMax,
                 title: { display: true, text: 'Cross-Direction Position (mm)', color: '#ccc', font: { size: 12 } },
                 ticks: { maxTicksLimit: 12, color: '#aaa' },
                 grid:  { color: 'rgba(0, 80, 200, 0.5)' },
             },
             y: {
                 type:  'linear',
-                ...(hiAlert !== 0 || loAlert !== 0
-                    ? { min: loAlert - 1, max: hiAlert + 1 }
-                    : {}),
-                title: { display: true, text: 'Measurement Value', color: '#ccc', font: { size: 12 } },
-                ticks: { color: '#aaa' },
+                ...yAxisRange,
+                title: { display: true, text: 'Deviation from Target (%)', color: '#ccc', font: { size: 12 } },
+                ticks: { color: '#aaa', callback: (v) => `${v.toFixed(1)}%` },
                 grid:  { color: 'rgba(0, 80, 200, 0.5)' },
             },
         },
-    }), [minScan, maxScan, hiAlert, loAlert]);
+    }), [xMin, xMax, hiPct, loPct, yAxisRange]);
 
     return (
         <div style={{ position: 'relative', height: '100%', width: '100%' }}>
