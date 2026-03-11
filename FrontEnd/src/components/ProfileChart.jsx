@@ -45,9 +45,7 @@ const profilePlugin = {
         const points = chart.data.datasets[0]?.data;
         if (!points || points.length < 2) return;
 
-        const yHiPct = scales.y.getPixelForValue(hiPct);
-        const yLoPct = scales.y.getPixelForValue(loPct);
-        const y0     = scales.y.getPixelForValue(0); // target line
+        const y0 = scales.y.getPixelForValue(0); // target line
 
         // Base clip: chart area only
         ctx.save();
@@ -68,19 +66,15 @@ const profilePlugin = {
             const y2 = scales.y.getPixelForValue(p2.y);
 
             if (mid > hiPct) {
-                // ── Yellow: profile down to hiPct ─────────────────────────
+                // ── Yellow: from profile down to target (0%) ──────────────
                 ctx.beginPath();
                 ctx.moveTo(x1, y1);
                 ctx.lineTo(x2, y2);
-                ctx.lineTo(x2, yHiPct);
-                ctx.lineTo(x1, yHiPct);
+                ctx.lineTo(x2, y0);
+                ctx.lineTo(x1, y0);
                 ctx.closePath();
                 ctx.fillStyle = 'rgba(220, 200, 0, 0.80)';
                 ctx.fill();
-
-                // ── Green: band from hiPct down to target (0%) ────────────
-                ctx.fillStyle = 'rgba(0, 180, 0, 0.80)';
-                ctx.fillRect(x1, yHiPct, x2 - x1, y0 - yHiPct);
 
             } else if (mid >= loPct) {
                 // ── Green: between profile and target (0%) ────────────────
@@ -94,10 +88,10 @@ const profilePlugin = {
                 ctx.fill();
 
             } else {
-                // ── Red: loPct down to profile ────────────────────────────
+                // ── Red: from profile up to target (0%) ───────────────────
                 ctx.beginPath();
-                ctx.moveTo(x1, yLoPct);
-                ctx.lineTo(x2, yLoPct);
+                ctx.moveTo(x1, y0);
+                ctx.lineTo(x2, y0);
                 ctx.lineTo(x2, y2);
                 ctx.lineTo(x1, y1);
                 ctx.closePath();
@@ -144,7 +138,7 @@ const profilePlugin = {
 
         if (hiPct !== 0 || loPct !== 0) {
             drawLine(hiPct, 'rgba(255, 220,  0, 1)',  `Hi: ${hiPct.toFixed(2)}`);
-            drawLine(loPct, 'rgba(255,  60, 60, 1)', `Lo: ${loPct.toFixed(2)}`);
+            drawLine(loPct, 'rgba(255,  60, 60, 1)', `Low: ${loPct.toFixed(2)}`);
         }
     },
 };
@@ -235,8 +229,8 @@ export default function ProfileChart({ scanData }) {
                 mode:      'index',
                 intersect: false,
                 callbacks: {
-                    title: (items) => `Position: ${items[0]?.parsed.x.toFixed(2)} mm`,
-                    label: (ctx)   => `Deviation: ${ctx.parsed.y.toFixed(3)}%`,
+                    //title: (items) => `Position: ${items[0]?.parsed.x.toFixed(2)} mm`,
+                    //label: (ctx)   => `Deviation: ${ctx.parsed.y.toFixed(3)}%`,
                 },
             },
             // Pass % values and actual target to the custom plugin
