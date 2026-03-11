@@ -85,33 +85,35 @@ const PACKET_SIZE_2048 = 10362;  // ProNet, 2048-bucket: 4 (gage) + 10358 (extPr
  *   116 x2sum         (double LE)  ← for sigma
  *   124 strt_avg      (float LE)
  *   128 end_avg       (float LE)
- *   132 prf[2048]     (float[2048] LE, 8192 bytes)
- *   8324 bkt_stat[2048] (uint8[2048])
- *   10372 valid_apc_data (uint8)
- *   10373 [padding 3]
- *   10376 sheet_width  (float LE)
- *   10380 target       (float LE)
- *   10384 noDataFlag   (uint16 LE)
- *   Total: 10386 bytes
+ *   132 prf[512]      (float[512] LE, 2048 bytes)   ← PRF_WIDTH=512 on actual device
+ *   2180 bkt_stat[512] (uint8[512], 512 bytes)
+ *   2692 valid_apc_data (uint8)
+ *   2693 [padding 3]
+ *   2696 sheet_width  (float LE)
+ *   2700 target       (float LE)
+ *   2704 stretchRatio (float LE)   ← MAX_STRETCHES=2>0, compiled in
+ *   2708 noDataFlag   (uint16 LE)
+ *   2710 [padding 2]
+ *   Total: 2712 bytes
  *
- * Full packet = 4 + 10386 = 10390 bytes
+ * Full packet = 4 + 2712 = 2716 bytes
  *
- * NOTE — stretchRatio field:
- *   structs.h defines `float stretchRatio` inside `#if MAX_STRETCHES > 0`.
- *   config.h sets NUM_SPEEDS=3, giving MAX_STRETCHES=2 > 0.
- *   If stretchRatio is compiled in, the layout becomes:
- *     10376 sheet_width  (float LE)
- *     10380 target       (float LE)
- *     10384 stretchRatio (float LE)  ← inserted before noDataFlag
- *     10388 noDataFlag   (uint16 LE)
- *     [2 bytes struct padding to align to 4-byte boundary]
- *     sizeof(scan_dat) = 10392  →  full packet = 10396 bytes
- *   Enable PRINT_OFFSETS in extobj.c to log the exact sizeof from the device.
- *   If you see persistent "unexpected byte sequence" warnings, increase
- *   SCAN_DAT_SIZE to 10392 and update the noDataFlag read offset below.
+ * NOTE: global.h defines PRF_WIDTH=2048 as the default, but the actual deployed
+ *   firmware uses PRF_WIDTH=512.  The struct comments in structs.h confirm this.
  */
-const SCAN_DAT_SIZE      = 10386;
-const PACKET_SIZE_NONPRONET = 4 + SCAN_DAT_SIZE; // 10390 bytes
+// PRF_WIDTH=512 (confirmed on actual device):
+//   prf[512]      at struct offset 132 → 512 × 4 = 2048 bytes → ends at 2180
+//   bkt_stat[512] at struct offset 2180 → 512 bytes → ends at 2692
+//   valid_apc_data (uint8)  at struct 2692
+//   padding (3)             at struct 2693
+//   sheet_width (float)     at struct 2696 → packet 2700
+//   target      (float)     at struct 2700 → packet 2704
+//   stretchRatio (float)    at struct 2704 → packet 2708  (MAX_STRETCHES=2 > 0)
+//   noDataFlag  (uint16)    at struct 2708 → packet 2712
+//   padding (2)             at struct 2710
+//   sizeof(scan_dat) = 2712   full packet = 2716
+const SCAN_DAT_SIZE         = 2712;
+const PACKET_SIZE_NONPRONET = 4 + SCAN_DAT_SIZE; // 2716 bytes
 
 /** Heartbeat value sent by device every ~10 seconds when no scan is occurring */
 const HEARTBEAT_VALUE = 1789;
@@ -228,11 +230,11 @@ function parseProNetPacket(buf) {
         sigma,
         minScan,
         maxScan,
-        // bktWdth,
+        bktWdth,         // mm per bucket  — used by frontend for X axis
+        footage,         // start-of-scan footage
+        bktCnt,          // 512 or 2048 — number of profile points
         // secondsPerBkt,
-        // footage,
         // endFootage,
-        // bktCnt,
         // totalCnt,
         // overCnt,
         // underCnt,
@@ -291,9 +293,11 @@ function parseNonProNetPacket(buf) {
         prf.push(buf.readFloatLE(PRF_OFFSET + i * 4));
     }
 
-    const sheetWidth    = buf.readFloatLE(10380);
-    const target        = buf.readFloatLE(10384);
-    const noDataFlag    = buf.readUInt16LE(10388);
+    // Tail fields — PRF_WIDTH=512 layout (see SCAN_DAT_SIZE comment above)
+    const sheetWidth    = buf.readFloatLE(2700);
+    const target        = buf.readFloatLE(2704);
+    // stretchRatio     = buf.readFloatLE(2708);  // compiled in but not needed
+    const noDataFlag    = buf.readUInt16LE(2712);
 
     // Sigma: sqrt(|x2sum / totalCnt - avg^2|), guard against division by zero
     let sigma = 0;
@@ -334,6 +338,53 @@ function parseNonProNetPacket(buf) {
     };
 }
 
+/**
+ * Parses one INLINE measurement batch from port 25001.
+ *
+ * Packet layout (big-endian):
+ *   Offset  Size  Type      Field
+ *   0       4     int32BE   gageNo    — which gage sent this batch (0-6)
+ *   4       4     int32BE   numItems  — number of Meas items in this batch
+ *   [repeated numItems times — 44 bytes each]
+ *   +0      4     floatBE   value     — raw gage measurement
+ *   +4      4     floatBE   cwPos     — cross-web position (mm)
+ *   +8      8     doubleBE  javaTime  — timestamp, ms since epoch
+ *   +16     8     doubleBE  mdPos     — machine-direction footage position
+ *   +24     4     int32BE   scanMode  — scan mode flag
+ *   +28     4     floatBE   lineSpd[0] — tach 1 line speed
+ *   +32     4     floatBE   lineSpd[1] — tach 2 line speed
+ *   +36     4     floatBE   lineSpd[2] — tach 3 line speed
+ *   +40     4     uint32BE  sysStat   — system status bitmask
+ *
+ * @param {Buffer} buf  - complete raw packet buffer (8 + numItems * 44 bytes)
+ * @returns {{ gageNo: number, readings: Array<Object> }}
+ */
+function parseMeasBatch(buf) {
+    const gageNo   = buf.readInt32BE(0);
+    const numItems = buf.readInt32BE(4);
+    const readings = [];
+    let pos = 8;
+
+    for (let i = 0; i < numItems; i++) {
+        readings.push({
+            value:     buf.readFloatBE(pos),        // raw gage reading
+            cwPos:     buf.readFloatBE(pos + 4),    // cross-web position (mm)
+            timestamp: buf.readDoubleBE(pos + 8),   // epoch ms
+            mdPos:     buf.readDoubleBE(pos + 16),  // machine-direction footage
+            scanMode:  buf.readInt32BE(pos + 24),   // scan mode flag
+            lineSpd: [
+                buf.readFloatBE(pos + 28),          // tach 1
+                buf.readFloatBE(pos + 32),          // tach 2
+                buf.readFloatBE(pos + 36),          // tach 3
+            ],
+            sysStat: buf.readUInt32BE(pos + 40),    // system status bitmask
+        });
+        pos += 44;
+    }
+
+    return { gageNo, readings };
+}
+
 module.exports = {
     PACKET_SIZE_512,
     PACKET_SIZE_2048,
@@ -344,4 +395,5 @@ module.exports = {
     expectedPacketSize,
     parseProNetPacket,
     parseNonProNetPacket,
+    parseMeasBatch,
 };
